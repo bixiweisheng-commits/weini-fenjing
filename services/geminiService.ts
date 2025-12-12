@@ -4,6 +4,7 @@ import { Asset, AspectRatio, Shot, QualityLevel } from "../types";
 // --- Key Pool Management ---
 let clients: GoogleGenAI[] = [];
 let currentClientIndex = 0;
+let currentBaseUrl: string | undefined = undefined;
 
 // Helper to resize/compress image to avoid XHR payload limits
 const compressImage = async (base64Str: string): Promise<string> => {
@@ -43,15 +44,22 @@ const compressImage = async (base64Str: string): Promise<string> => {
   }
 };
 
-export const initGemini = (apiKeys: string[] | string) => {
+export const initGemini = (apiKeys: string[] | string, baseUrl?: string) => {
   // Handle both array and single string for backward compatibility
   const keysList = Array.isArray(apiKeys) ? apiKeys : [apiKeys];
   
   // Filter duplicates and empty strings
   const uniqueKeys = Array.from(new Set(keysList.filter(k => k && k.trim())));
-  clients = uniqueKeys.map(key => new GoogleGenAI({ apiKey: key }));
+  
+  currentBaseUrl = baseUrl;
+
+  clients = uniqueKeys.map(key => new GoogleGenAI({ 
+      apiKey: key,
+      baseUrl: baseUrl // Pass baseUrl if provided
+  }));
+  
   currentClientIndex = 0;
-  console.log(`Initialized Gemini pool with ${clients.length} keys`);
+  console.log(`Initialized Gemini pool with ${clients.length} keys. BaseURL: ${baseUrl || 'Default'}`);
 };
 
 export const getClientCount = () => clients.length;
@@ -85,8 +93,9 @@ async function executeWithRetry<T>(
       
       if (isRateLimit || isServerOverload) {
         console.warn(`Key index ${(currentClientIndex - 1 + clients.length) % clients.length} hit limit, switching...`);
-        // Wait 3 seconds before retrying (Increased from 1s to ensure quota resets)
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // Fast retry for high concurrency mode
+        // Only wait a tiny bit to let the loop breathe, but don't block for seconds
+        await new Promise(resolve => setTimeout(resolve, 500));
         continue;
       }
       
@@ -97,9 +106,9 @@ async function executeWithRetry<T>(
   throw lastError;
 }
 
-export const validateApiKey = async (apiKey: string): Promise<boolean> => {
+export const validateApiKey = async (apiKey: string, baseUrl?: string): Promise<boolean> => {
   try {
-    const tempClient = new GoogleGenAI({ apiKey });
+    const tempClient = new GoogleGenAI({ apiKey, baseUrl });
     await tempClient.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: 'ping',

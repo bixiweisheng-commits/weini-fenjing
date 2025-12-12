@@ -1,15 +1,25 @@
-import React, { useState } from 'react';
-import { Key, X, Info } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Key, X, Info, Globe } from 'lucide-react';
 
 interface Props {
-  onSubmit: (keys: string[]) => void;
+  onSubmit: (keys: string[], baseUrl?: string) => void;
   onClose?: () => void;
   hasExistingKey: boolean;
 }
 
 export const ApiKeyInput: React.FC<Props> = ({ onSubmit, onClose, hasExistingKey }) => {
   const [inputVal, setInputVal] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const storedBaseUrl = localStorage.getItem('gemini_api_base_url');
+    if (storedBaseUrl) setBaseUrl(storedBaseUrl);
+    
+    // Pre-fill keys if they exist in localStorage for editing convenience (optional, but good UX)
+    // For security we might skip this, but user asked for convenience. 
+    // Let's just handle base url pre-fill.
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,7 +31,7 @@ export const ApiKeyInput: React.FC<Props> = ({ onSubmit, onClose, hasExistingKey
     if (keys.length === 0) return;
     
     setLoading(true);
-    await onSubmit(keys);
+    await onSubmit(keys, baseUrl.trim() || undefined);
     setLoading(false);
   };
 
@@ -42,11 +52,10 @@ export const ApiKeyInput: React.FC<Props> = ({ onSubmit, onClose, hasExistingKey
             <Key size={24} />
           </div>
           <h2 className="text-2xl font-bold text-white">
-              API 密钥池
+              API 设置
           </h2>
           <p className="text-gray-400 text-center text-sm">
-            为了提高生成速度并避免配额限制，建议输入多个 Key。<br/>
-            系统将自动在多个 Key 之间轮询。
+            配置 Gemini API 密钥与中转服务地址。
           </p>
         </div>
         
@@ -60,15 +69,32 @@ export const ApiKeyInput: React.FC<Props> = ({ onSubmit, onClose, hasExistingKey
               value={inputVal}
               onChange={(e) => setInputVal(e.target.value)}
               placeholder={`AIzaSy...\nAIzaSy...`}
-              className="w-full h-32 bg-black/50 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all font-mono text-xs resize-none"
+              className="w-full h-24 bg-black/50 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all font-mono text-xs resize-none"
               required
             />
+          </div>
+
+          <div>
+             <div className="flex items-center gap-2 text-xs text-gray-500 mb-2">
+                <Globe size={12} />
+                <span>API Base URL / 中转接口 (可选)</span>
+             </div>
+             <input
+                type="text"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://generativelanguage.googleapis.com"
+                className="w-full bg-black/50 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all font-mono text-xs"
+             />
+             <p className="text-[10px] text-gray-500 mt-1.5 ml-1">
+                如果您使用第三方中转服务或反代，请在此填入地址。留空则使用官方默认地址。
+             </p>
           </div>
           
           <div className="bg-primary/10 border border-primary/20 rounded p-3 flex gap-2 items-start">
              <Info size={14} className="text-primary mt-0.5 flex-shrink-0" />
              <p className="text-[10px] text-gray-300 leading-tight">
-                提示：Gemini 免费版每分钟限制 15 次请求。使用多账号的 Key 构建密钥池，可以大幅提升并发生成速度（如 3x3 九宫格）。
+                提示：为了获得最快的生成速度，建议填入多个 Key。系统将自动开启高并发模式。
              </p>
           </div>
 
@@ -90,16 +116,11 @@ export const ApiKeyInput: React.FC<Props> = ({ onSubmit, onClose, hasExistingKey
                 {loading ? (
                   <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
-                  '验证并保存'
+                  '保存配置'
                 )}
               </button>
           </div>
         </form>
-        <div className="mt-6 text-center">
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-gray-500 hover:text-primary transition-colors">
-                获取 Google AI Studio API 密钥
-            </a>
-        </div>
       </div>
     </div>
   );

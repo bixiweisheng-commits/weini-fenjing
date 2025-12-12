@@ -29,12 +29,13 @@ const App: React.FC = () => {
   useEffect(() => {
     const storedKeysJson = localStorage.getItem('gemini_api_keys');
     const storedSingleKey = localStorage.getItem('gemini_api_key'); // Backward compatibility
+    const storedBaseUrl = localStorage.getItem('gemini_api_base_url');
     
     if (storedKeysJson) {
         try {
             const keys = JSON.parse(storedKeysJson);
             if (Array.isArray(keys) && keys.length > 0) {
-                initGemini(keys);
+                initGemini(keys, storedBaseUrl || undefined);
                 setHasKey(true);
                 return;
             }
@@ -43,7 +44,7 @@ const App: React.FC = () => {
     
     // Fallback to single key if legacy exists
     if (storedSingleKey) {
-       initGemini([storedSingleKey]);
+       initGemini([storedSingleKey], storedBaseUrl || undefined);
        setHasKey(true);
        // Upgrade storage
        localStorage.setItem('gemini_api_keys', JSON.stringify([storedSingleKey]));
@@ -52,19 +53,24 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleApiKeySubmit = async (keys: string[]) => {
+  const handleApiKeySubmit = async (keys: string[], baseUrl?: string) => {
     // Validate the first one at least to ensure basic connectivity
-    // We assume if user pastes multiple, they know what they are doing, but we validate one.
-    const isValid = await validateApiKey(keys[0]);
+    const isValid = await validateApiKey(keys[0], baseUrl);
     if (isValid) {
       setHasKey(true);
       localStorage.setItem('gemini_api_keys', JSON.stringify(keys));
+      if (baseUrl) {
+        localStorage.setItem('gemini_api_base_url', baseUrl);
+      } else {
+        localStorage.removeItem('gemini_api_base_url');
+      }
+      
       // Clear legacy
       localStorage.removeItem('gemini_api_key');
-      initGemini(keys);
+      initGemini(keys, baseUrl);
       setShowKeyModal(false);
     } else {
-      alert('第一个 API 密钥验证失败。请检查您的密钥。');
+      alert('API 连接验证失败。请检查 Key 或 Base URL。');
     }
   };
 
@@ -112,11 +118,13 @@ const App: React.FC = () => {
         setSelectedShotId(plannedShots[0].id);
       }
 
-      // --- DYNAMIC CONCURRENCY QUEUE (STAGGERED) ---
+      // --- HIGH PERFORMANCE CONCURRENCY QUEUE ---
       const clientCount = getClientCount();
-      // Even with multiple keys, limit concurrency to clientCount.
-      // E.g., 3 keys = 3 concurrent requests max.
-      const CONCURRENCY_LIMIT = Math.max(1, clientCount);
+      // "High Concurrency Mode" requested by user.
+      // Allow 3 concurrent requests per key. 
+      // If using a custom proxy (BaseURL), this is usually safe.
+      // If using Official Free Tier, this might hit limits, but user explicitly asked for speed.
+      const CONCURRENCY_LIMIT = Math.max(1, clientCount * 3);
       
       console.log(`Starting generation with ${clientCount} keys. Concurrency limit: ${CONCURRENCY_LIMIT}`);
 
@@ -171,13 +179,6 @@ const App: React.FC = () => {
                   if (idx > -1) activePromises.splice(idx, 1);
               });
               activePromises.push(p);
-              
-              // CRITICAL: Stagger the start of requests significantly.
-              // Wait 2 seconds before starting the next request even if we have capacity.
-              // This prevents hitting the "Burst" limit of the API.
-              if (queue.length > 0) {
-                 await new Promise(r => setTimeout(r, 2000)); 
-              }
           }
 
           if (activePromises.length === 0 && queue.length === 0) break;
@@ -375,7 +376,7 @@ const App: React.FC = () => {
       
       {showKeyModal && (
         <ApiKeyInput 
-            onSubmit={(k) => handleApiKeySubmit(k)} 
+            onSubmit={(k, u) => handleApiKeySubmit(k, u)} 
             hasExistingKey={hasKey}
             onClose={hasKey ? () => setShowKeyModal(false) : undefined}
         />
