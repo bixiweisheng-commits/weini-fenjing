@@ -107,26 +107,25 @@ const App: React.FC = () => {
         setSelectedShotId(plannedShots[0].id);
       }
 
-      // Dynamic Concurrency Control
+      // --- DYNAMIC CONCURRENCY QUEUE ---
       const clientCount = getClientCount();
-      // If 1 client: limit to 1 concurrent to be safe.
-      // If >1 client: allow (count * 2) concurrency to speed up.
-      const CONCURRENCY_LIMIT = clientCount === 1 ? 1 : Math.min(clientCount * 2, 6);
+      // Strict limit: 1 request per key. This is the safest for Free Tier.
+      // If you have 3 keys, you get 3 concurrent requests.
+      const CONCURRENCY_LIMIT = Math.max(1, clientCount);
       
       console.log(`Starting generation with ${clientCount} keys. Concurrency limit: ${CONCURRENCY_LIMIT}`);
 
-      // Execution Queue
+      // Queue of shots to generate
       const queue = [...plannedShots];
+      // Active workers
       const activePromises: Promise<void>[] = [];
 
+      // Worker function
       const processNext = async () => {
           if (queue.length === 0) return;
           const shot = queue.shift();
           if (!shot) return;
 
-          // Find the index in the state to update
-          // Note: plannedShots is our source of truth for IDs
-          
           try {
              const imageUrl = await generateShotImage(shot, assets, quality, false);
              setShots(prev => {
@@ -140,11 +139,11 @@ const App: React.FC = () => {
           } catch (error: any) {
              console.error(`Error generating shot:`, error);
              const isRateLimit = error.message?.includes('429') || error.status === 429;
-             const isXhrError = error.message?.includes('xhr error') || error.code === 6;
+             const isXhrError = error.message?.includes('xhr') || error.code === 6;
              
              let errorMsg = '生成失败';
              if (isRateLimit) errorMsg = '配额受限';
-             if (isXhrError) errorMsg = '网络错误(重试)';
+             if (isXhrError) errorMsg = '网络错误';
              
              setShots(prev => {
                 const newShots = [...prev];
@@ -157,20 +156,24 @@ const App: React.FC = () => {
           }
       };
 
-      // Initial fill of the concurrency pool
+      // Queue Processor
       while (queue.length > 0 || activePromises.length > 0) {
-          // Fill pool up to limit
+          // Fill the pool up to the limit
           while (queue.length > 0 && activePromises.length < CONCURRENCY_LIMIT) {
               const p = processNext().then(() => {
-                  // Remove self from active list when done
+                  // When a promise finishes, remove it from active list
                   const idx = activePromises.indexOf(p);
                   if (idx > -1) activePromises.splice(idx, 1);
               });
               activePromises.push(p);
+              
+              // Small stagger delay to prevent exact millisecond bursts
+              await new Promise(r => setTimeout(r, 200)); 
           }
 
-          if (activePromises.length === 0) break;
-          // Wait for at least one to finish before trying to fill again
+          if (activePromises.length === 0 && queue.length === 0) break;
+          
+          // Wait for at least one worker to free up
           await Promise.race(activePromises);
       }
 

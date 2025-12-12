@@ -84,8 +84,9 @@ async function executeWithRetry<T>(
       const isServerOverload = error.code === 503 || error.status === 503;
       
       if (isRateLimit || isServerOverload) {
-        console.warn(`Key index ${currentClientIndex} hit limit/error, switching...`);
-        // Continue loop to try next client immediately
+        console.warn(`Key index ${(currentClientIndex - 1 + clients.length) % clients.length} hit limit, switching...`);
+        // Wait 1 second before retrying to respect rate limits
+        await new Promise(resolve => setTimeout(resolve, 1000));
         continue;
       }
       
