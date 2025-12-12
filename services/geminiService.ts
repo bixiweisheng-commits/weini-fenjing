@@ -1,11 +1,100 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { Asset, AspectRatio, Shot, QualityLevel } from "../types";
 
-let client: GoogleGenAI | null = null;
+// --- Key Pool Management ---
+let clients: GoogleGenAI[] = [];
+let currentClientIndex = 0;
 
-export const initGemini = (apiKey: string) => {
-  client = new GoogleGenAI({ apiKey });
+// Helper to resize/compress image to avoid XHR payload limits
+const compressImage = async (base64Str: string): Promise<string> => {
+  if (!base64Str.startsWith('data:image')) return base64Str;
+  
+  try {
+    return await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxWidth = 1024; // Limit width to 1024px
+        let width = img.width;
+        let height = img.height;
+        
+        if (width > maxWidth) {
+          height = (maxWidth / width) * height;
+          width = maxWidth;
+        }
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            resolve(base64Str);
+            return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        // Compress to JPEG 70% quality
+        resolve(canvas.toDataURL('image/jpeg', 0.7)); 
+      };
+      img.onerror = () => resolve(base64Str); // Fallback
+      img.src = base64Str;
+    });
+  } catch (e) {
+    console.warn("Image compression failed, using original", e);
+    return base64Str;
+  }
 };
+
+export const initGemini = (apiKeys: string[] | string) => {
+  // Handle both array and single string for backward compatibility
+  const keysList = Array.isArray(apiKeys) ? apiKeys : [apiKeys];
+  
+  // Filter duplicates and empty strings
+  const uniqueKeys = Array.from(new Set(keysList.filter(k => k && k.trim())));
+  clients = uniqueKeys.map(key => new GoogleGenAI({ apiKey: key }));
+  currentClientIndex = 0;
+  console.log(`Initialized Gemini pool with ${clients.length} keys`);
+};
+
+export const getClientCount = () => clients.length;
+
+// Helper to get next client in round-robin fashion
+const getNextClient = (): GoogleGenAI => {
+  if (clients.length === 0) throw new Error("Gemini clients not initialized");
+  const client = clients[currentClientIndex];
+  currentClientIndex = (currentClientIndex + 1) % clients.length;
+  return client;
+};
+
+// Helper to execute with retry logic specifically for 429s across the pool
+async function executeWithRetry<T>(
+  operation: (client: GoogleGenAI) => Promise<T>, 
+  maxRetries: number = 2
+): Promise<T> {
+  let lastError: any;
+  
+  // Try up to (pool size + maxRetries) times to find a working key
+  const attempts = Math.max(clients.length, maxRetries + 1);
+
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const client = getNextClient();
+      return await operation(client);
+    } catch (error: any) {
+      lastError = error;
+      const isRateLimit = error.message?.includes('429') || error.status === 429 || error.message?.includes('Quota exceeded');
+      const isServerOverload = error.code === 503 || error.status === 503;
+      
+      if (isRateLimit || isServerOverload) {
+        console.warn(`Key index ${currentClientIndex} hit limit/error, switching...`);
+        // Continue loop to try next client immediately
+        continue;
+      }
+      
+      throw error;
+    }
+  }
+  
+  throw lastError;
+}
 
 export const validateApiKey = async (apiKey: string): Promise<boolean> => {
   try {
@@ -31,14 +120,11 @@ export const planStoryboard = async (
   gridSize: number,
   assets: Asset[]
 ): Promise<Shot[]> => {
-  if (!client) throw new Error("Gemini client not initialized");
-
   const totalShots = gridSize * gridSize;
 
   // Prepare input for the Planner
   const contentParts: any[] = [];
   
-  // Add text prompt first
   contentParts.push({
     text: `
       你是一位屡获殊荣的电影摄影指导（DP）和分镜大师。请根据用户需求，设计一个包含 ${totalShots} 个镜头的分镜脚本。
@@ -73,9 +159,10 @@ export const planStoryboard = async (
     `
   });
 
-  // Add reference images to the planner context
-  assets.forEach(asset => {
-    const matches = asset.url.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+  // Compress assets before sending for planning
+  for (const asset of assets) {
+    const compressedUrl = await compressImage(asset.url);
+    const matches = compressedUrl.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
     if (matches && matches.length === 3) {
         contentParts.push({
             inlineData: {
@@ -84,33 +171,35 @@ export const planStoryboard = async (
             }
         });
     }
-  });
+  }
 
-  // Switch to gemini-2.5-flash for reliability and speed in planning
-  const response = await client.models.generateContent({
-    model: "gemini-2.5-flash", 
-    contents: { parts: contentParts },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          shots: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                description: { type: Type.STRING },
-                visualStyle: { type: Type.STRING },
-                shotType: { type: Type.STRING }
-              },
-              required: ["description", "visualStyle", "shotType"]
-            }
+  // Execute with pool
+  const response = await executeWithRetry(async (client) => {
+      return await client.models.generateContent({
+        model: "gemini-2.5-flash", 
+        contents: { parts: contentParts },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              shots: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    description: { type: Type.STRING },
+                    visualStyle: { type: Type.STRING },
+                    shotType: { type: Type.STRING }
+                  },
+                  required: ["description", "visualStyle", "shotType"]
+                }
+              }
+            },
+            required: ["shots"]
           }
-        },
-        required: ["shots"]
-      }
-    }
+        }
+      });
   });
 
   if (!response.text) throw new Error("No plan generated");
@@ -131,7 +220,6 @@ export const planStoryboard = async (
         }
     }
 
-    // Return structured Shot objects (without IDs yet)
     return plannedShots.map(s => ({
         id: '', // to be filled by caller
         description: s.description,
@@ -154,17 +242,14 @@ export const generateShotImage = async (
   quality: QualityLevel = 'standard',
   isRegeneration: boolean = false
 ): Promise<string> => {
-  if (!client) throw new Error("Gemini client not initialized");
-
+  
   // Quality modifiers
   let qualityPrompt = "";
   if (quality === 'hd') qualityPrompt = ", 4k resolution, highly detailed, sharp focus, cinematic lighting, octane render";
   if (quality === '4k') qualityPrompt = ", 8k resolution, masterpiece, production quality, incredibly detailed, ray tracing, unreal engine 5 style";
 
-  // Variety modifier for regeneration
   const varietySeed = isRegeneration ? ` (Variation ${Date.now()})` : "";
 
-  // Construct Prompt
   const promptText = `
     [Camera Angle: ${shot.shotType || 'Cinematic'}]
     ${shot.description}
@@ -175,12 +260,12 @@ export const generateShotImage = async (
     Ensure the camera angle matches the description (e.g. if it says Overhead, it MUST be Overhead).
   `;
 
-  // Prepare content parts
   const parts: any[] = [{ text: promptText }];
 
-  // Add all assets as reference images
-  assets.forEach(asset => {
-    const matches = asset.url.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+  // Compress assets before sending for generation
+  for (const asset of assets) {
+    const compressedUrl = await compressImage(asset.url);
+    const matches = compressedUrl.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
     if (matches && matches.length === 3) {
         parts.push({
             inlineData: {
@@ -189,19 +274,21 @@ export const generateShotImage = async (
             }
         });
     }
-  });
+  }
 
-  // Decide model based on quality/need
   const modelName = "gemini-2.5-flash-image"; 
 
-  const response = await client.models.generateContent({
-    model: modelName,
-    contents: { parts },
-    config: {
-      imageConfig: {
-        aspectRatio: shot.aspectRatio,
-      }
-    }
+  // Execute with pool and retry logic
+  const response = await executeWithRetry(async (client) => {
+      return await client.models.generateContent({
+        model: modelName,
+        contents: { parts },
+        config: {
+          imageConfig: {
+            aspectRatio: shot.aspectRatio,
+          }
+        }
+      });
   });
 
   const contentParts = response.candidates?.[0]?.content?.parts;
@@ -221,25 +308,27 @@ export const editShotImage = async (
   originalImageBase64: string,
   instruction: string
 ): Promise<string> => {
-  if (!client) throw new Error("Gemini client not initialized");
+  // Compress original image if it's too large to be used as input
+  const compressedBase64 = await compressImage(originalImageBase64);
+  const base64Data = compressedBase64.replace(/^data:image\/\w+;base64,/, "");
 
-  const base64Data = originalImageBase64.replace(/^data:image\/\w+;base64,/, "");
-
-  const response = await client.models.generateContent({
-    model: "gemini-2.5-flash-image",
-    contents: {
-      parts: [
-        {
-            inlineData: {
-                mimeType: "image/png",
-                data: base64Data
+  const response = await executeWithRetry(async (client) => {
+      return await client.models.generateContent({
+        model: "gemini-2.5-flash-image",
+        contents: {
+          parts: [
+            {
+                inlineData: {
+                    mimeType: "image/png",
+                    data: base64Data
+                }
+            },
+            {
+              text: instruction,
             }
+          ],
         },
-        {
-          text: instruction,
-        }
-      ],
-    },
+      });
   });
 
   const parts = response.candidates?.[0]?.content?.parts;

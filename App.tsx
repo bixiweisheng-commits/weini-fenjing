@@ -1,16 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { initGemini, validateApiKey, planStoryboard, generateShotImage, editShotImage } from './services/geminiService';
+import { initGemini, validateApiKey, planStoryboard, generateShotImage, editShotImage, getClientCount } from './services/geminiService';
 import { ApiKeyInput } from './components/ApiKeyInput';
 import { LeftSidebar } from './components/LeftSidebar';
 import { RightSidebar } from './components/RightSidebar';
 import { ShotCard } from './components/ShotCard';
 import { EditShotModal } from './components/EditShotModal';
 import { Asset, Shot, AspectRatio, GridSize, QualityLevel } from './types';
-import { Layout, Download, Grid, Settings, Key, Menu } from 'lucide-react';
+import { Layout, Download, Grid, Key } from 'lucide-react';
 import JSZip from 'jszip';
 
 const App: React.FC = () => {
-  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [hasKey, setHasKey] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [assets, setAssets] = useState<Asset[]>([]);
   
@@ -27,26 +27,44 @@ const App: React.FC = () => {
 
   // Initialize API from localStorage if available
   useEffect(() => {
-    const storedKey = localStorage.getItem('gemini_api_key');
-    if (storedKey) {
-      handleApiKeySubmit(storedKey, true); // initial load
+    const storedKeysJson = localStorage.getItem('gemini_api_keys');
+    const storedSingleKey = localStorage.getItem('gemini_api_key'); // Backward compatibility
+    
+    if (storedKeysJson) {
+        try {
+            const keys = JSON.parse(storedKeysJson);
+            if (Array.isArray(keys) && keys.length > 0) {
+                initGemini(keys);
+                setHasKey(true);
+                return;
+            }
+        } catch(e) { /* ignore */ }
+    }
+    
+    // Fallback to single key if legacy exists
+    if (storedSingleKey) {
+       initGemini([storedSingleKey]);
+       setHasKey(true);
+       // Upgrade storage
+       localStorage.setItem('gemini_api_keys', JSON.stringify([storedSingleKey]));
     } else {
-      setShowKeyModal(true);
+       setShowKeyModal(true);
     }
   }, []);
 
-  const handleApiKeySubmit = async (key: string, isInitial = false) => {
-    const isValid = await validateApiKey(key);
+  const handleApiKeySubmit = async (keys: string[]) => {
+    // Validate the first one at least to ensure basic connectivity
+    // We assume if user pastes multiple, they know what they are doing, but we validate one.
+    const isValid = await validateApiKey(keys[0]);
     if (isValid) {
-      setApiKey(key);
-      localStorage.setItem('gemini_api_key', key);
-      initGemini(key);
+      setHasKey(true);
+      localStorage.setItem('gemini_api_keys', JSON.stringify(keys));
+      // Clear legacy
+      localStorage.removeItem('gemini_api_key');
+      initGemini(keys);
       setShowKeyModal(false);
     } else {
-      alert('API 密钥无效');
-      if (isInitial || !apiKey) {
-        localStorage.removeItem('gemini_api_key');
-      }
+      alert('第一个 API 密钥验证失败。请检查您的密钥。');
     }
   };
 
@@ -85,49 +103,80 @@ const App: React.FC = () => {
       }));
       setShots(plannedShots);
 
-      // Select the first shot by default once planned
       if (plannedShots.length > 0) {
         setSelectedShotId(plannedShots[0].id);
       }
 
-      // Execute sequentially to avoid 429 Rate Limits (Resource Exhausted)
-      for (let i = 0; i < plannedShots.length; i++) {
-        const shot = plannedShots[i];
-        
-        try {
-          const imageUrl = await generateShotImage(shot, assets, quality, false);
-          
-          setShots(prev => {
-             const newShots = [...prev];
-             if (newShots[i]) {
-                newShots[i] = { ...shot, imageUrl, isGenerating: false };
-             }
-             return newShots;
-          });
-        } catch (error: any) {
-           console.error(`Error generating shot ${i}:`, error);
-           const isRateLimit = error.message?.includes('429') || error.status === 429;
-           const errorMsg = isRateLimit ? '配额受限 (稍后重试)' : '生成失败';
-           
-           setShots(prev => {
-             const newShots = [...prev];
-             if (newShots[i]) {
-                newShots[i] = { ...shot, isGenerating: false, error: errorMsg };
-             }
-             return newShots;
-           });
+      // Dynamic Concurrency Control
+      const clientCount = getClientCount();
+      // If 1 client: limit to 1 concurrent to be safe.
+      // If >1 client: allow (count * 2) concurrency to speed up.
+      const CONCURRENCY_LIMIT = clientCount === 1 ? 1 : Math.min(clientCount * 2, 6);
+      
+      console.log(`Starting generation with ${clientCount} keys. Concurrency limit: ${CONCURRENCY_LIMIT}`);
 
-           // If rate limited, wait a bit before trying the next one to be polite to the API
-           if (isRateLimit) {
-               await new Promise(resolve => setTimeout(resolve, 2000));
-           }
-        }
+      // Execution Queue
+      const queue = [...plannedShots];
+      const activePromises: Promise<void>[] = [];
+
+      const processNext = async () => {
+          if (queue.length === 0) return;
+          const shot = queue.shift();
+          if (!shot) return;
+
+          // Find the index in the state to update
+          // Note: plannedShots is our source of truth for IDs
+          
+          try {
+             const imageUrl = await generateShotImage(shot, assets, quality, false);
+             setShots(prev => {
+                const newShots = [...prev];
+                const targetIdx = newShots.findIndex(s => s.id === shot.id);
+                if (targetIdx !== -1) {
+                    newShots[targetIdx] = { ...shot, imageUrl, isGenerating: false };
+                }
+                return newShots;
+             });
+          } catch (error: any) {
+             console.error(`Error generating shot:`, error);
+             const isRateLimit = error.message?.includes('429') || error.status === 429;
+             const isXhrError = error.message?.includes('xhr error') || error.code === 6;
+             
+             let errorMsg = '生成失败';
+             if (isRateLimit) errorMsg = '配额受限';
+             if (isXhrError) errorMsg = '网络错误(重试)';
+             
+             setShots(prev => {
+                const newShots = [...prev];
+                const targetIdx = newShots.findIndex(s => s.id === shot.id);
+                if (targetIdx !== -1) {
+                    newShots[targetIdx] = { ...shot, isGenerating: false, error: errorMsg };
+                }
+                return newShots;
+             });
+          }
+      };
+
+      // Initial fill of the concurrency pool
+      while (queue.length > 0 || activePromises.length > 0) {
+          // Fill pool up to limit
+          while (queue.length > 0 && activePromises.length < CONCURRENCY_LIMIT) {
+              const p = processNext().then(() => {
+                  // Remove self from active list when done
+                  const idx = activePromises.indexOf(p);
+                  if (idx > -1) activePromises.splice(idx, 1);
+              });
+              activePromises.push(p);
+          }
+
+          if (activePromises.length === 0) break;
+          // Wait for at least one to finish before trying to fill again
+          await Promise.race(activePromises);
       }
 
     } catch (error: any) {
       console.error("Storyboard generation failed", error);
-      alert(`生成分镜失败: ${error.message || "请检查 API Key 配额或重试"}`);
-      // Do not clear shots here so user can see what happened or retry specific ones if plan succeeded
+      alert(`生成分镜失败: ${error.message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -143,7 +192,6 @@ const App: React.FC = () => {
     setShots(newShots);
 
     try {
-      // Pass isRegeneration = true to force variety
       const imageUrl = await generateShotImage(shot, assets, quality, true);
       newShots[shotIndex] = { ...shot, imageUrl, isGenerating: false };
       setShots([...newShots]);
@@ -193,7 +241,6 @@ const App: React.FC = () => {
 
     imagesToDownload.forEach((shot, index) => {
         if (shot.imageUrl) {
-            // Remove data URL prefix to get raw base64
             const base64Data = shot.imageUrl.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
             const filename = `shot-${index + 1}-${shot.shotType?.replace(/\s+/g, '-') || 'scene'}.png`;
             zip.file(filename, base64Data, {base64: true});
@@ -235,7 +282,6 @@ const App: React.FC = () => {
       />
 
       <div className="flex-1 flex flex-col h-full overflow-hidden bg-black/50 relative">
-        {/* Canvas Header */}
         <div className="h-16 flex items-center justify-between px-6 border-b border-white/5 bg-[#09090b]">
            <div className="flex items-center gap-2">
                <h2 className="text-lg font-bold text-white">画布</h2>
@@ -243,14 +289,13 @@ const App: React.FC = () => {
            </div>
            
            <div className="flex items-center gap-4">
-               {/* Improved API Key Button */}
                <button 
                   onClick={handleChangeKey}
                   className="flex items-center gap-2 bg-white/5 hover:bg-primary/20 hover:text-primary px-3 py-1.5 rounded-lg text-xs text-gray-300 transition-all border border-white/5"
                   title="更换 API Key"
                >
                    <Key size={14} />
-                   <span>API 设置</span>
+                   <span>API 设置 ({getClientCount()} keys)</span>
                </button>
 
                <div className="h-4 w-[1px] bg-white/10"></div>
@@ -269,9 +314,7 @@ const App: React.FC = () => {
            </div>
         </div>
 
-        {/* Canvas Grid */}
         <main className="flex-1 overflow-y-auto p-8 relative">
-           {/* Grid Background Effect */}
             <div className="absolute inset-0 bg-[radial-gradient(#1f1f22_1px,transparent_1px)] [background-size:20px_20px] opacity-20 pointer-events-none"></div>
 
             {shots.length === 0 ? (
@@ -320,8 +363,8 @@ const App: React.FC = () => {
       {showKeyModal && (
         <ApiKeyInput 
             onSubmit={(k) => handleApiKeySubmit(k)} 
-            hasExistingKey={!!apiKey}
-            onClose={apiKey ? () => setShowKeyModal(false) : undefined}
+            hasExistingKey={hasKey}
+            onClose={hasKey ? () => setShowKeyModal(false) : undefined}
         />
       )}
     </div>
