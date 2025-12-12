@@ -25,7 +25,7 @@ interface PlanResponse {
   shots: { description: string; visualStyle: string; shotType: string }[];
 }
 
-// 1. Plan the Storyboard using Thinking Model
+// 1. Plan the Storyboard
 export const planStoryboard = async (
   prompt: string,
   gridSize: number,
@@ -35,7 +35,7 @@ export const planStoryboard = async (
 
   const totalShots = gridSize * gridSize;
 
-  // Prepare input for the Planner so it can "see" the style
+  // Prepare input for the Planner
   const contentParts: any[] = [];
   
   // Add text prompt first
@@ -86,11 +86,11 @@ export const planStoryboard = async (
     }
   });
 
+  // Switch to gemini-2.5-flash for reliability and speed in planning
   const response = await client.models.generateContent({
-    model: "gemini-3-pro-preview",
+    model: "gemini-2.5-flash", 
     contents: { parts: contentParts },
     config: {
-      thinkingConfig: { thinkingBudget: 32768 },
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -192,7 +192,6 @@ export const generateShotImage = async (
   });
 
   // Decide model based on quality/need
-  // We stick to 2.5 flash image for reliability as requested, but enhance prompt for quality
   const modelName = "gemini-2.5-flash-image"; 
 
   const response = await client.models.generateContent({

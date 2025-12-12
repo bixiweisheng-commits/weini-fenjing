@@ -44,8 +44,6 @@ const App: React.FC = () => {
       setShowKeyModal(false);
     } else {
       alert('API 密钥无效');
-      // If it's not initial load (user trying to change key), don't wipe existing valid key unless necessary
-      // But here we enforce valid key.
       if (isInitial || !apiKey) {
         localStorage.removeItem('gemini_api_key');
       }
@@ -101,7 +99,6 @@ const App: React.FC = () => {
           
           setShots(prev => {
              const newShots = [...prev];
-             // Safely update the shot at the correct index
              if (newShots[i]) {
                 newShots[i] = { ...shot, imageUrl, isGenerating: false };
              }
@@ -127,10 +124,10 @@ const App: React.FC = () => {
         }
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Storyboard generation failed", error);
-      alert("生成分镜失败，请重试。");
-      setShots([]);
+      alert(`生成分镜失败: ${error.message || "请检查 API Key 配额或重试"}`);
+      // Do not clear shots here so user can see what happened or retry specific ones if plan succeeded
     } finally {
       setIsGenerating(false);
     }
@@ -147,12 +144,12 @@ const App: React.FC = () => {
 
     try {
       // Pass isRegeneration = true to force variety
-      // Note: generateShotImage uses shot.description, which may have been updated by handleUpdateShot
       const imageUrl = await generateShotImage(shot, assets, quality, true);
       newShots[shotIndex] = { ...shot, imageUrl, isGenerating: false };
       setShots([...newShots]);
-    } catch (e) {
-      newShots[shotIndex] = { ...shot, isGenerating: false, error: "重试失败" };
+    } catch (e: any) {
+      const errorMsg = e.message?.includes('429') ? "配额超限" : "重试失败";
+      newShots[shotIndex] = { ...shot, isGenerating: false, error: errorMsg };
       setShots([...newShots]);
     }
   };
