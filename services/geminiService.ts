@@ -85,8 +85,8 @@ async function executeWithRetry<T>(
       
       if (isRateLimit || isServerOverload) {
         console.warn(`Key index ${(currentClientIndex - 1 + clients.length) % clients.length} hit limit, switching...`);
-        // Wait 1 second before retrying to respect rate limits
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait 3 seconds before retrying (Increased from 1s to ensure quota resets)
+        await new Promise(resolve => setTimeout(resolve, 3000));
         continue;
       }
       

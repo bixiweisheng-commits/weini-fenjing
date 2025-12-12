@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Grid2X2, Grid3X3, Plus, Image as ImageIcon, Sparkles, LayoutGrid } from 'lucide-react';
+import { Grid2X2, Grid3X3, Plus, Image as ImageIcon, Sparkles, LayoutGrid, X } from 'lucide-react';
 import { Asset, AssetType, AspectRatio, GridSize, QualityLevel } from '../types';
 
 interface Props {
@@ -15,6 +15,7 @@ interface Props {
   setQuality: (q: QualityLevel) => void;
   assets: Asset[];
   onAddAsset: (a: Asset) => void;
+  onRemoveAsset: (id: string) => void;
 }
 
 export const LeftSidebar: React.FC<Props> = ({
@@ -22,7 +23,7 @@ export const LeftSidebar: React.FC<Props> = ({
   gridSize, setGridSize,
   aspectRatio, setAspectRatio,
   quality, setQuality,
-  assets, onAddAsset
+  assets, onAddAsset, onRemoveAsset
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -122,6 +123,12 @@ export const LeftSidebar: React.FC<Props> = ({
                {assets.map(a => (
                    <div key={a.id} className="aspect-square bg-surfaceHighlight rounded overflow-hidden border border-white/5 relative group">
                        <img src={a.url} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
+                       <button 
+                           onClick={(e) => { e.stopPropagation(); onRemoveAsset(a.id); }}
+                           className="absolute top-0 right-0 p-0.5 bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500/80"
+                       >
+                           <X size={10} />
+                       </button>
                    </div>
                ))}
                <button onClick={() => fileInputRef.current?.click()} className="aspect-square bg-black/20 rounded border border-white/10 border-dashed flex items-center justify-center text-gray-600 hover:text-gray-400 hover:border-white/20 transition-all">

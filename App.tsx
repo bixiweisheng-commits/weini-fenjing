@@ -76,6 +76,10 @@ const App: React.FC = () => {
     setShots(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
   };
 
+  const handleRemoveAsset = (id: string) => {
+    setAssets(prev => prev.filter(a => a.id !== id));
+  };
+
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
     setIsGenerating(true);
@@ -94,6 +98,7 @@ const App: React.FC = () => {
       }));
       setShots(placeholderShots);
 
+      // 1. Plan Storyboard (Text Model - Usually fast and reliable)
       const plannedShotsData = await planStoryboard(prompt, gridSize, assets);
 
       const plannedShots: Shot[] = plannedShotsData.map((s, idx) => ({
@@ -107,10 +112,10 @@ const App: React.FC = () => {
         setSelectedShotId(plannedShots[0].id);
       }
 
-      // --- DYNAMIC CONCURRENCY QUEUE ---
+      // --- DYNAMIC CONCURRENCY QUEUE (STAGGERED) ---
       const clientCount = getClientCount();
-      // Strict limit: 1 request per key. This is the safest for Free Tier.
-      // If you have 3 keys, you get 3 concurrent requests.
+      // Even with multiple keys, limit concurrency to clientCount.
+      // E.g., 3 keys = 3 concurrent requests max.
       const CONCURRENCY_LIMIT = Math.max(1, clientCount);
       
       console.log(`Starting generation with ${clientCount} keys. Concurrency limit: ${CONCURRENCY_LIMIT}`);
@@ -167,8 +172,12 @@ const App: React.FC = () => {
               });
               activePromises.push(p);
               
-              // Small stagger delay to prevent exact millisecond bursts
-              await new Promise(r => setTimeout(r, 200)); 
+              // CRITICAL: Stagger the start of requests significantly.
+              // Wait 2 seconds before starting the next request even if we have capacity.
+              // This prevents hitting the "Burst" limit of the API.
+              if (queue.length > 0) {
+                 await new Promise(r => setTimeout(r, 2000)); 
+              }
           }
 
           if (activePromises.length === 0 && queue.length === 0) break;
@@ -282,6 +291,7 @@ const App: React.FC = () => {
         setQuality={setQuality}
         assets={assets}
         onAddAsset={(a) => setAssets([...assets, a])}
+        onRemoveAsset={handleRemoveAsset}
       />
 
       <div className="flex-1 flex flex-col h-full overflow-hidden bg-black/50 relative">
